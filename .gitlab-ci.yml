@@ -1,0 +1,108 @@
+spec:
+  inputs:
+    tag:
+      default: test
+      description: Additional tag for the docker image
+---
+stages:
+  - build
+  - test
+  - deploy
+
+include:
+- template: Security/SAST.gitlab-ci.yml
+- template: Security/Secret-Detection.gitlab-ci.yml
+- template: Jobs/Container-Scanning.gitlab-ci.yml
+
+image: alpine:3.23
+
+tag_version:
+  stage: .pre
+  image: node:24-alpine
+  before_script:
+    - apk add git
+    - npm install -g semantic-release
+    - npm install @semantic-release/gitlab -D
+  script:
+    # Create release and commit changes
+    - |
+      npx semantic-release --dry-run --branches $CI_COMMIT_REF_NAME > sem_rel
+      cat sem_rel
+      grep 'There are no relevant changes, so no new version is released.' sem_rel \
+        && exit 0
+      next_version=$(cat sem_rel | grep '[Tt]he next release version is' | sed -E 's/.* ([[:digit:].]+)$/\1/')
+      echo $next_version
+      echo "NEW_TAG_VERSION=$next_version" >> build.env
+  artifacts:
+    reports:
+      dotenv: build.env
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+build:
+  stage: build
+  image:
+    name: moby/buildkit:rootless
+    entrypoint: [""]
+  variables:
+    BUILDKITD_FLAGS: --oci-worker-no-process-sandbox
+  before_script:
+    - mkdir -p ~/.docker
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > ~/.docker/config.json
+  script:
+    - |
+      extra_tag=""
+      if [[ $NEW_TAG_VERSION ]] ; then
+        extra_tag="--output type=image,name=$CI_REGISTRY_IMAGE:$NEW_TAG_VERSION,push=true"
+      fi
+      if [[ $[[ inputs.tag ]] ; then
+        extra_tag="$extra_tag --output type=image,name=$CI_REGISTRY_IMAGE:$[[ inputs.tag ]],push=true"
+      fi
+      buildctl-daemonless.sh build \
+        --frontend dockerfile.v0 \
+        --local context=. \
+        --local dockerfile=. \
+        --output type=image,name=$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA,push=true \
+        --output type=image,name=$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG,push=true \
+        --output type=image,name=$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA,push=true \
+        $extra_tag
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+sast:
+  stage: test
+variables:
+  SECRET_DETECTION_ENABLED: 'true'
+  GITLAB_ADVANCED_SAST_ENABLED: 'true'
+
+secret_detection:
+  stage: test
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+container_scanning:
+  stage: test
+  variables:
+    CS_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+    GIT_STRATEGY: fetch
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+semantic_release:
+  stage: deploy
+  image: node:24-alpine
+  before_script:
+    - apk add git
+    - npm install -g semantic-release
+    - npm install @semantic-release/gitlab -D
+  script:
+    - npx semantic-release
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $NEW_TAG_VERSION != ""
