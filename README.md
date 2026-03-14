@@ -1,5 +1,7 @@
 # lyrics.ovh: Only the lyrics
 
+Forked from https://github.com/NTag/lyrics.ovh
+
 Source of the website https://lyrics.ovh — find the lyrics for any song, quickly and without ads.
 
 A Chrome Extension is also available, thanks to Varal7: https://github.com/Varal7/lyrics-chrome-extension.
